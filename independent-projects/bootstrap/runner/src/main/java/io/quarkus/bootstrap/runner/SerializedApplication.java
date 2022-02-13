@@ -9,6 +9,7 @@ import java.nio.file.FileVisitResult;
 import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -19,6 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
@@ -101,6 +103,13 @@ public class SerializedApplication {
         }
     }
 
+    private static Collection<String> writeJar(DataOutputStream data, Path jar) throws IOException {
+        if (isExplodedJarResource(jar)) {
+            return writeFromExplodedJar(data, jar);
+        }
+        return writeFromSingleJar(data, jar);
+    }
+
     public static SerializedApplication read(InputStream inputStream, Path appRoot) throws IOException {
         try (DataInputStream in = new DataInputStream(inputStream)) {
             if (in.readInt() != MAGIC) {
@@ -122,7 +131,10 @@ public class SerializedApplication {
                     info = new ManifestInfo(readNullableString(in), readNullableString(in), readNullableString(in),
                             readNullableString(in), readNullableString(in), readNullableString(in));
                 }
-                JarResource resource = new JarResource(info, appRoot.resolve(path));
+                Path resourcePath = appRoot.resolve(path);
+                ClassLoadingResource resource = isExplodedJarResource(resourcePath)
+                        ? new ExplodedJarResource(info, resourcePath)
+                        : new JarResource(info, resourcePath);
                 allClassLoadingResources[pathCount] = resource;
                 int numDirs = in.readUnsignedShort();
                 for (int i = 0; i < numDirs; ++i) {
@@ -167,6 +179,10 @@ public class SerializedApplication {
         }
     }
 
+    private static boolean isExplodedJarResource(Path resourcePath) {
+        return resourcePath.toFile().isDirectory() && resourcePath.toString().endsWith(".jar");
+    }
+
     private static String readNullableString(DataInputStream in) throws IOException {
         if (in.readBoolean()) {
             return in.readUTF();
@@ -178,7 +194,7 @@ public class SerializedApplication {
      * @return a List of all resources that exist in the paths that we desire to have fully indexed
      *         (configured via {@code FULLY_INDEXED_PATHS})
      */
-    private static List<String> writeJar(DataOutputStream out, Path jar) throws IOException {
+    private static List<String> writeFromSingleJar(DataOutputStream out, Path jar) throws IOException {
         try (JarFile zip = new JarFile(jar.toFile())) {
             Manifest manifest = zip.getManifest();
             if (manifest == null) {
@@ -259,6 +275,111 @@ public class SerializedApplication {
         }
     }
 
+    /**
+     * @return a List of all resources that exist in the paths that we desire to have fully indexed
+     *         (configured via {@code FULLY_INDEXED_PATHS})
+     */
+    private static List<String> writeFromExplodedJar(DataOutputStream out, Path jarFolder) throws IOException {
+
+        var jarFolderFile = jarFolder.toFile();
+        if (!jarFolderFile.isDirectory()) {
+            return List.of();
+        }
+
+        Manifest manifest = null;
+        var manifestPath = jarFolder.resolve("META-INF/MANIFEST.MF");
+        if (manifestPath.toFile().exists()) {
+            try (var is = Files.newInputStream(manifestPath)) {
+                manifest = new Manifest(is);
+            }
+        }
+
+        if (manifest == null) {
+            out.writeBoolean(false);
+        } else {
+            //write the manifest
+            Attributes ma = manifest.getMainAttributes();
+            if (ma == null) {
+                out.writeBoolean(false);
+            } else {
+                out.writeBoolean(true);
+                writeNullableString(out, ma.getValue(Attributes.Name.SPECIFICATION_TITLE));
+                writeNullableString(out, ma.getValue(Attributes.Name.SPECIFICATION_VERSION));
+                writeNullableString(out, ma.getValue(Attributes.Name.SPECIFICATION_VENDOR));
+                writeNullableString(out, ma.getValue(Attributes.Name.IMPLEMENTATION_TITLE));
+                writeNullableString(out, ma.getValue(Attributes.Name.IMPLEMENTATION_VERSION));
+                writeNullableString(out, ma.getValue(Attributes.Name.IMPLEMENTATION_VENDOR));
+            }
+        }
+
+        Set<String> dirs = new HashSet<>();
+        Map<String, List<String>> fullyIndexedPaths = new HashMap<>();
+
+        var hasDefaultPackage = new AtomicBoolean();
+
+        Files.walkFileTree(jarFolder, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path jarFolderEntry, BasicFileAttributes attrs) throws IOException {
+
+                var entry = jarFolderEntry.toFile();
+                String entryName = jarFolder.relativize(jarFolderEntry).toString();
+
+                if (!entryName.contains("/")) {
+                    hasDefaultPackage.set(true);
+                    if (!entryName.isEmpty() && FULLY_INDEXED_PATHS.contains("")) {
+                        fullyIndexedPaths.computeIfAbsent("", SerializedApplication::newFullyIndexedPathsValue)
+                                .add(entryName);
+                    }
+                } else if (!entry.isDirectory()) {
+                    //some jars don't have correct directory entries
+                    //so we look at the file paths instead
+                    //looking at you h2
+                    final int index = entryName.lastIndexOf('/');
+                    dirs.add(entryName.substring(0, index));
+
+                    if (entryName.startsWith(META_INF_VERSIONS)) {
+                        //multi release jar
+                        //we add all packages here
+                        //they may not be relevant for some versions, but that is fine
+                        String part = entryName.substring(META_INF_VERSIONS.length());
+                        int slash = part.indexOf("/");
+                        if (slash != -1) {
+                            final int subIndex = part.lastIndexOf('/');
+                            if (subIndex != slash) {
+                                dirs.add(part.substring(slash + 1, subIndex));
+                            }
+                        }
+                    }
+
+                    for (String path : FULLY_INDEXED_PATHS) {
+                        if (path.isEmpty()) {
+                            continue;
+                        }
+                        if (entryName.startsWith(path)) {
+                            fullyIndexedPaths.computeIfAbsent(path, SerializedApplication::newFullyIndexedPathsValue)
+                                    .add(entryName);
+                        }
+                    }
+                }
+
+                return FileVisitResult.CONTINUE;
+            }
+        });
+
+        if (hasDefaultPackage.get()) {
+            dirs.add("");
+        }
+        out.writeShort(dirs.size());
+        for (String i : dirs) {
+            out.writeUTF(i);
+        }
+        List<String> result = new ArrayList<>();
+        for (List<String> values : fullyIndexedPaths.values()) {
+            result.addAll(values);
+        }
+        return result;
+    }
+
     private static List<String> newFullyIndexedPathsValue(String ignored) {
         return new ArrayList<>(10);
     }
@@ -329,11 +450,11 @@ public class SerializedApplication {
         private final Map<String, ClassLoadingResource[]> result = new HashMap<>();
         private final Map<String, Set<ClassLoadingResource>> overrides = new HashMap<>();
 
-        void addResourceDir(String dir, JarResource resource) {
+        void addResourceDir(String dir, ClassLoadingResource resource) {
             ClassLoadingResource[] existing = result.get(dir);
             if (existing == null) {
                 // this is the first the dir was ever tracked
-                result.put(dir, new JarResource[] { resource });
+                result.put(dir, new ClassLoadingResource[] { resource });
             } else {
                 ClassLoadingResource existingResource = existing[0];
                 if (existingResource.equals(resource)) {
