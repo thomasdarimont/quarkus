@@ -21,6 +21,10 @@ public class ExplodedJarResource implements ClassLoadingResource {
     private final ManifestInfo manifestInfo;
     private ProtectionDomain protectionDomain;
 
+    public static boolean isExplodedJarResource(Path resourcePath) {
+        return resourcePath.toFile().isDirectory() && resourcePath.toString().endsWith(".jar");
+    }
+
     public ExplodedJarResource(ManifestInfo manifestInfo, Path path) {
         this.path = path;
         this.manifestInfo = manifestInfo;

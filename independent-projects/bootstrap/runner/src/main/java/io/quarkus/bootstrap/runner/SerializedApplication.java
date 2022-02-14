@@ -104,7 +104,7 @@ public class SerializedApplication {
     }
 
     private static Collection<String> writeJar(DataOutputStream data, Path jar) throws IOException {
-        if (isExplodedJarResource(jar)) {
+        if (ExplodedJarResource.isExplodedJarResource(jar)) {
             return writeFromExplodedJar(data, jar);
         }
         return writeFromSingleJar(data, jar);
@@ -132,7 +132,7 @@ public class SerializedApplication {
                             readNullableString(in), readNullableString(in), readNullableString(in));
                 }
                 Path resourcePath = appRoot.resolve(path);
-                ClassLoadingResource resource = isExplodedJarResource(resourcePath)
+                ClassLoadingResource resource = ExplodedJarResource.isExplodedJarResource(resourcePath)
                         ? new ExplodedJarResource(info, resourcePath)
                         : new JarResource(info, resourcePath);
                 allClassLoadingResources[pathCount] = resource;
@@ -177,10 +177,6 @@ public class SerializedApplication {
             }
             return new SerializedApplication(runnerClassLoader, mainClass);
         }
-    }
-
-    private static boolean isExplodedJarResource(Path resourcePath) {
-        return resourcePath.toFile().isDirectory() && resourcePath.toString().endsWith(".jar");
     }
 
     private static String readNullableString(DataInputStream in) throws IOException {
