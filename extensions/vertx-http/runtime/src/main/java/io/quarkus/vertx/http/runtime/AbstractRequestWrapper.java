@@ -28,8 +28,8 @@ import io.vertx.core.http.impl.HttpServerRequestInternal;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.SocketAddress;
 
-public abstract class AbstractRequestWrapper
-        implements HttpServerRequest, HttpServerRequestInternal {
+public abstract class AbstractRequestWrapper extends HttpServerRequestInternal
+        implements HttpServerRequest {
 
     protected final HttpServerRequestInternal delegate;
 

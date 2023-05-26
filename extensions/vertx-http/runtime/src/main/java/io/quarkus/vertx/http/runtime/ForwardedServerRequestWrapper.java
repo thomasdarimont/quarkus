@@ -28,7 +28,7 @@ import io.vertx.core.http.impl.HttpServerRequestInternal;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.SocketAddress;
 
-class ForwardedServerRequestWrapper implements HttpServerRequest, HttpServerRequestInternal {
+class ForwardedServerRequestWrapper extends HttpServerRequestInternal implements HttpServerRequest {
 
     private final HttpServerRequestInternal delegate;
     private final ForwardedParser forwardedParser;
